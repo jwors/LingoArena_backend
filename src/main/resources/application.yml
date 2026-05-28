@@ -1,0 +1,43 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/lingoarena
+    username: lingoarena
+    password: lingoarena
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+  redis:
+    host: localhost
+    port: 6379
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    serialization:
+      write-dates-as-timestamps: false
+    date-format: yyyy-MM-dd'T'HH:mm:ss'Z'
+    time-zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+jwt:
+  secret: ${JWT_SECRET:lingoarena-dev-secret-key-change-in-production}
+  access-token-expiration-minutes: 15
+  refresh-token-expiration-days: 7
+
+game:
+  round:
+    time-limit-seconds: 15
+
+app:
+  cors:
+    allowed-origins: http://localhost:3000
+
+server:
+  port: 8080
