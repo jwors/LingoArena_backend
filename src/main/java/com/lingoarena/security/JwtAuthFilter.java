@@ -1,5 +1,8 @@
 package com.lingoarena.security;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lingoarena.dto.response.ErrorResponse;
+import com.lingoarena.exception.ErrorCode;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -33,6 +36,7 @@ import java.util.Collections;
 public class JwtAuthFilter extends OncePerRequestFilter {
 
     private final JwtTokenService jwtTokenService;
+    private final ObjectMapper objectMapper;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
@@ -40,15 +44,22 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                                     FilterChain filterChain) throws ServletException, IOException {
         String token = extractToken(request);
 
-        if (token != null && jwtTokenService.validateToken(token)) {
-            Long userId = jwtTokenService.getUserIdFromToken(token);
-            // 将 userId 存入 SecurityContext，后续 Controller 能通过 @AuthenticationPrincipal 获取
-            UsernamePasswordAuthenticationToken authentication =
-                    new UsernamePasswordAuthenticationToken(userId, null, Collections.emptyList());
-            SecurityContextHolder.getContext().setAuthentication(authentication);
+        if (token != null) {
+            if (jwtTokenService.validateToken(token)) {
+                Long userId = jwtTokenService.getUserIdFromToken(token);
+                UsernamePasswordAuthenticationToken authentication =
+                        new UsernamePasswordAuthenticationToken(userId, null, Collections.emptyList());
+                SecurityContextHolder.getContext().setAuthentication(authentication);
+            } else {
+                // token 无效或过期，返回 401 + 错误码，前端可以根据 TOKEN_EXPIRED 跳登录页
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                response.setContentType("application/json;charset=UTF-8");
+                objectMapper.writeValue(response.getWriter(),
+                        new ErrorResponse(ErrorCode.TOKEN_EXPIRED.getCode(), ErrorCode.TOKEN_EXPIRED.getMessage()));
+                return;
+            }
         }
 
-        // 无论是否有 token，都放行——SecurityConfig 中配置了哪些路径需要认证
         filterChain.doFilter(request, response);
     }
 

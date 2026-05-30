@@ -15,9 +15,13 @@ import com.lingoarena.repository.UserRepository;
 import com.lingoarena.repository.WordbookRepository;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.security.SecureRandom;
+import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 房间服务。
@@ -29,6 +33,7 @@ import java.security.SecureRandom;
  * - 避免混淆：I/1、O/0 已移除
  * - 生成时检查唯一性，直到生成一个未使用过的码
  */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class RoomService {
@@ -93,6 +98,36 @@ public class RoomService {
         room = gameRoomRepository.save(room);
 
         return gameRoomMapper.toResponse(room);
+    }
+
+    /**
+     * 如果房间还在等待中，将其取消。
+     * 在 WebSocket 断开且房间无人时调用。
+     */
+    @Transactional
+    public void cancelRoomIfWaiting(Long roomId) {
+        GameRoom room = gameRoomRepository.findById(roomId).orElse(null);
+        if (room != null && room.getStatus() == RoomStatus.WAITING) {
+            room.setStatus(RoomStatus.CANCELLED);
+            gameRoomRepository.save(room);
+            log.info("Room {} cancelled (abandoned)", roomId);
+        }
+    }
+
+    /**
+     * 定时清理创建超过 30 分钟仍未开始的房间。
+     * 每分钟执行一次，防止空房间堆积。
+     */
+    @Scheduled(fixedRate = 60_000)
+    @Transactional
+    public void cleanupStaleRooms() {
+        LocalDateTime deadline = LocalDateTime.now().minusMinutes(30);
+        List<GameRoom> staleRooms = gameRoomRepository.findByStatusAndCreatedAtBefore(RoomStatus.WAITING, deadline);
+        for (GameRoom room : staleRooms) {
+            room.setStatus(RoomStatus.CANCELLED);
+            log.info("Room {} cancelled by scheduled cleanup (created at {})", room.getId(), room.getCreatedAt());
+        }
+        gameRoomRepository.saveAll(staleRooms);
     }
 
     /** 获取房间信息 */

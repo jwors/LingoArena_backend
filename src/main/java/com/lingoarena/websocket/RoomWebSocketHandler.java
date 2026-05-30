@@ -3,6 +3,7 @@ package com.lingoarena.websocket;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lingoarena.service.GameService;
+import com.lingoarena.service.RoomService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -31,6 +32,7 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
 
     private final WebSocketSessionManager sessionManager;
     private final GameService gameService;
+    private final RoomService roomService;
     private final ObjectMapper objectMapper;
 
     /** 连接建立时调用 */
@@ -81,10 +83,16 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
 
         sessionManager.removeSession(roomId, userId, session);
 
-        // 通知对手
-        String disconnectMsg = String.format(
-                "{\"type\":\"opponent_disconnected\",\"payload\":{\"userId\":%d}}", userId);
-        sessionManager.broadcastToRoom(roomId, disconnectMsg);
+        // 如果房间里没有其他连接了，且游戏还没开始，直接取消房间
+        if (sessionManager.getRoomSessions(roomId).isEmpty()) {
+            roomService.cancelRoomIfWaiting(roomId);
+            log.info("Room {} cancelled (host disconnected before game started)", roomId);
+        } else {
+            // 仍有其他玩家，通知对手
+            String disconnectMsg = String.format(
+                    "{\"type\":\"opponent_disconnected\",\"payload\":{\"userId\":%d}}", userId);
+            sessionManager.broadcastToRoom(roomId, disconnectMsg);
+        }
 
         log.info("User {} disconnected from room {}, status: {}", userId, roomId, status);
     }

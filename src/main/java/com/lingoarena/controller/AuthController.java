@@ -7,6 +7,7 @@ import com.lingoarena.dto.response.AuthResponse;
 import com.lingoarena.service.AuthService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
@@ -20,6 +21,7 @@ import org.springframework.web.bind.annotation.*;
  * @AuthenticationPrincipal Long userId 从 JWT token 中解析出的用户 ID，
  * 由 JwtAuthFilter 在 SecurityContext 中设置的。
  */
+@Slf4j
 @RestController
 @RequestMapping("/api/auth")
 @RequiredArgsConstructor
@@ -30,12 +32,14 @@ public class AuthController {
     /** 注册 */
     @PostMapping("/register")
     public ResponseEntity<AuthResponse> register(@Valid @RequestBody RegisterRequest request) {
+        log.info("register_info:{}", request);
         return ResponseEntity.ok(authService.register(request));
     }
 
     /** 登录 */
     @PostMapping("/login")
     public ResponseEntity<AuthResponse> login(@Valid @RequestBody LoginRequest request) {
+        log.info("login_info:{}",request);
         return ResponseEntity.ok(authService.login(request));
     }
 
