@@ -41,32 +41,38 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
     @Override
     public boolean beforeHandshake(ServerHttpRequest request, ServerHttpResponse response,
                                    WebSocketHandler wsHandler, Map<String, Object> attributes) {
-        URI uri = request.getURI();
-        String query = uri.getQuery();
+        try {
+            URI uri = request.getURI();
+            String query = uri.getQuery();
 
-        if (query == null || !query.contains("token=")) {
-            log.warn("WebSocket handshake rejected: missing token");
+            if (query == null || !query.contains("token=")) {
+                log.warn("WebSocket handshake rejected: missing token");
+                response.setStatusCode(HttpStatus.UNAUTHORIZED);
+                return false;
+            }
+
+            String token = extractQueryParam(query, "token");
+            if (token == null || !jwtTokenService.validateToken(token)) {
+                log.warn("WebSocket handshake rejected: invalid token");
+                response.setStatusCode(HttpStatus.UNAUTHORIZED);
+                return false;
+            }
+
+            String roomIdStr = extractQueryParam(query, "roomId");
+            Long roomId = roomIdStr != null ? Long.parseLong(roomIdStr) : null;
+            Long userId = jwtTokenService.getUserIdFromToken(token);
+
+            // 重要：这些信息会传给 RoomWebSocketHandler，通过 session.getAttributes() 获取
+            attributes.put("userId", userId);
+            attributes.put("roomId", roomId);
+
+            log.debug("WebSocket handshake success: userId={}, roomId={}", userId, roomId);
+            return true;
+        } catch (Exception e) {
+            log.error("WebSocket handshake error: {}", e.getMessage(), e);
             response.setStatusCode(HttpStatus.UNAUTHORIZED);
             return false;
         }
-
-        String token = extractQueryParam(query, "token");
-        if (token == null || !jwtTokenService.validateToken(token)) {
-            log.warn("WebSocket handshake rejected: invalid token");
-            response.setStatusCode(HttpStatus.UNAUTHORIZED);
-            return false;
-        }
-
-        String roomIdStr = extractQueryParam(query, "roomId");
-        Long roomId = roomIdStr != null ? Long.parseLong(roomIdStr) : null;
-        Long userId = jwtTokenService.getUserIdFromToken(token);
-
-        // 重要：这些信息会传给 RoomWebSocketHandler，通过 session.getAttributes() 获取
-        attributes.put("userId", userId);
-        attributes.put("roomId", roomId);
-
-        log.debug("WebSocket handshake success: userId={}, roomId={}", userId, roomId);
-        return true;
     }
 
     @Override

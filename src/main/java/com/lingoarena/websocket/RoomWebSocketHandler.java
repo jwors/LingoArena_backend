@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lingoarena.service.GameService;
 import com.lingoarena.service.RoomService;
+import com.lingoarena.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -33,6 +34,7 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
     private final WebSocketSessionManager sessionManager;
     private final GameService gameService;
     private final RoomService roomService;
+    private final UserRepository userRepository;
     private final ObjectMapper objectMapper;
 
     /** 连接建立时调用 */
@@ -43,12 +45,17 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
 
         sessionManager.addSession(roomId, userId, session);
 
-        // 通知房间内的所有人有人加入了
+        // 查询用户昵称，通知房间内的所有人有人加入了
+        String nickname = userRepository.findById(userId)
+                .map(user -> user.getNickname())
+                .orElse("unknown");
+        // 防止昵称中的特殊字符破坏 JSON 格式
+        String escapedNickname = nickname.replace("\\", "\\\\").replace("\"", "\\\"");
         String joinMsg = String.format(
-                "{\"type\":\"room_joined\",\"payload\":{\"user\":{\"id\":%d}}}", userId);
+                "{\"type\":\"room_joined\",\"payload\":{\"user\":{\"id\":%d,\"nickname\":\"%s\"}}}", userId, escapedNickname);
         sessionManager.broadcastToRoom(roomId, joinMsg);
 
-        log.info("User {} connected to room {}", userId, roomId);
+        log.info("User {} ({}) connected to room {}", userId, nickname, roomId);
     }
 
     /** 收到消息时调用 */
