@@ -3,6 +3,7 @@ package com.lingoarena.controller;
 import com.lingoarena.dto.request.CreateRoomRequest;
 import com.lingoarena.dto.request.JoinRoomRequest;
 import com.lingoarena.dto.response.RoomResponse;
+import com.lingoarena.service.GameService;
 import com.lingoarena.service.RoomService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -22,6 +23,7 @@ import java.util.Map;
 public class RoomController {
 
     private final RoomService roomService;
+    private final GameService gameService;
 
     /** 创建房间 */
     @PostMapping
@@ -43,5 +45,14 @@ public class RoomController {
     @GetMapping("/{id}")
     public ResponseEntity<Map<String, RoomResponse>> get(@PathVariable Long id) {
         return ResponseEntity.ok(Map.of("room", roomService.getRoom(id)));
+    }
+
+    /** 房主开始游戏（需要双方都已准备） */
+    @PostMapping("/{id}/start")
+    public ResponseEntity<Map<String, String>> start(
+            @PathVariable Long id,
+            @AuthenticationPrincipal Long userId) {
+        gameService.startGame(id, userId);
+        return ResponseEntity.ok(Map.of("status", "started"));
     }
 }

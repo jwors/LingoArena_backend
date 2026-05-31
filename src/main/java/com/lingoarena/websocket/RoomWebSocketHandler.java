@@ -2,8 +2,8 @@ package com.lingoarena.websocket;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lingoarena.engine.GameManager;
 import com.lingoarena.service.GameService;
-import com.lingoarena.service.RoomService;
 import com.lingoarena.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -18,13 +18,12 @@ import java.io.IOException;
 /**
  * WebSocket 消息处理器。
  *
- * 处理 WebSocket 连接生命周期和消息：
- * - 连接建立：将 session 注册到 SessionManager
- * - 消息到达：解析 JSON，根据 type 分发到不同处理方法
- * - 连接断开：清理 session，通知对手
+ * 处理游戏阶段的 WebSocket 消息：
+ * - 连接/断开：通知对手状态变化
+ * - player_ready：标记准备
+ * - submit_answer：提交答案
  *
- * 消息格式：{"type": "消息类型", "payload": {...}}
- * 和 REST API 不同，WebSocket 消息用 type 字段区分用途，而不是 URL 路径。
+ * 房间管理和游戏开始由 REST API 处理。
  */
 @Slf4j
 @Component
@@ -33,7 +32,6 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
 
     private final WebSocketSessionManager sessionManager;
     private final GameService gameService;
-    private final RoomService roomService;
     private final UserRepository userRepository;
     private final ObjectMapper objectMapper;
 
@@ -43,17 +41,27 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
         Long userId = sessionManager.getUserIdFromSession(session);
         Long roomId = sessionManager.getRoomIdFromSession(session);
 
+        if (roomId == null || userId == null) {
+            log.warn("Connection rejected: missing userId or roomId in session attributes");
+            try {
+                session.close(CloseStatus.BAD_DATA);
+            } catch (IOException e) {
+                log.error("Failed to close invalid session: {}", e.getMessage());
+            }
+            return;
+        }
+
         sessionManager.addSession(roomId, userId, session);
 
-        // 查询用户昵称，通知房间内的所有人有人加入了
+        // 查询用户昵称，通知对手有人上线了
         String nickname = userRepository.findById(userId)
                 .map(user -> user.getNickname())
                 .orElse("unknown");
-        // 防止昵称中的特殊字符破坏 JSON 格式
         String escapedNickname = nickname.replace("\\", "\\\\").replace("\"", "\\\"");
-        String joinMsg = String.format(
-                "{\"type\":\"room_joined\",\"payload\":{\"user\":{\"id\":%d,\"nickname\":\"%s\"}}}", userId, escapedNickname);
-        sessionManager.broadcastToRoom(roomId, joinMsg);
+        String statusMsg = String.format(
+                "{\"type\":\"opponent:status\",\"payload\":{\"userId\":%d,\"nickname\":\"%s\",\"status\":\"connected\"}}",
+                userId, escapedNickname);
+        sessionManager.broadcastToRoom(roomId, statusMsg);
 
         log.info("User {} ({}) connected to room {}", userId, nickname, roomId);
     }
@@ -69,10 +77,13 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
             Long userId = sessionManager.getUserIdFromSession(session);
             Long roomId = sessionManager.getRoomIdFromSession(session);
 
-            // 根据消息类型分发处理
+            if (roomId == null || userId == null) {
+                sendError(session, "INVALID_SESSION", "连接无效，缺少用户信息");
+                return;
+            }
+
             switch (type) {
                 case "player_ready" -> handlePlayerReady(roomId, userId);
-                case "select_wordbook" -> handleSelectWordbook(roomId, userId, payload);
                 case "submit_answer" -> handleSubmitAnswer(roomId, userId, payload);
                 default -> sendError(session, "UNKNOWN_TYPE", "未知消息类型: " + type);
             }
@@ -88,54 +99,73 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
         Long userId = sessionManager.getUserIdFromSession(session);
         Long roomId = sessionManager.getRoomIdFromSession(session);
 
+        if (roomId == null || userId == null) {
+            log.debug("Skip cleanup for session without userId/roomId");
+            return;
+        }
+
         sessionManager.removeSession(roomId, userId, session);
 
-        // 如果房间里没有其他连接了，且游戏还没开始，直接取消房间
-        if (sessionManager.getRoomSessions(roomId).isEmpty()) {
-            roomService.cancelRoomIfWaiting(roomId);
-            log.info("Room {} cancelled (host disconnected before game started)", roomId);
-        } else {
-            // 仍有其他玩家，通知对手
-            String disconnectMsg = String.format(
-                    "{\"type\":\"opponent_disconnected\",\"payload\":{\"userId\":%d}}", userId);
-            sessionManager.broadcastToRoom(roomId, disconnectMsg);
-        }
+        // 通知对手有人断线
+        String disconnectMsg = String.format(
+                "{\"type\":\"opponent:status\",\"payload\":{\"userId\":%d,\"status\":\"disconnected\"}}", userId);
+        sessionManager.broadcastToRoom(roomId, disconnectMsg);
 
         log.info("User {} disconnected from room {}, status: {}", userId, roomId, status);
     }
 
     /** 处理玩家准备 */
     private void handlePlayerReady(Long roomId, Long userId) {
-        String msg = String.format(
-                "{\"type\":\"player_ready_ack\",\"payload\":{\"userId\":%d,\"ready\":true}}", userId);
-        sessionManager.broadcastToRoom(roomId, msg);
-    }
+        gameService.setPlayerReady(roomId, userId);
 
-    /** 房主选择词库 */
-    private void handleSelectWordbook(Long roomId, Long userId, JsonNode payload) {
-        String msg = String.format(
-                "{\"type\":\"select_wordbook_ack\",\"payload\":{\"wordbookId\":%d}}",
-                payload.get("wordbookId").asLong());
-        sessionManager.broadcastToRoom(roomId, msg);
+        // 广播准备状态给房间所有人
+        String readyMsg = String.format(
+                "{\"type\":\"opponent:status\",\"payload\":{\"userId\":%d,\"status\":\"ready\"}}", userId);
+        sessionManager.broadcastToRoom(roomId, readyMsg);
     }
 
     /** 处理玩家提交答案 */
     private void handleSubmitAnswer(Long roomId, Long userId, JsonNode payload) {
         int round = payload.get("round").asInt();
         String answer = payload.get("answer").asText();
+        long timestamp = payload.has("timestamp") ? payload.get("timestamp").asLong() : System.currentTimeMillis();
 
-        gameService.submitAnswer(roomId, userId, round, answer, System.currentTimeMillis());
+        // 核验答案
+        GameManager.AnswerCheckResult result = gameService.submitAnswer(roomId, userId, round, answer, timestamp);
 
-        // 如果双方都答完了，广播本轮结果
-        if (gameService.bothAnswered(roomId, round)) {
-            String resultMsg = String.format(
-                    "{\"type\":\"round_result\",\"payload\":{\"round\":%d}}", round);
-            sessionManager.broadcastToRoom(roomId, resultMsg);
+        if (result.hasError()) {
+            sendError(sessionManager.getUserSession(userId), "ANSWER_ERROR", result.getError());
+            return;
+        }
+
+        // 推送 answer:result 给答题者本人
+        String resultMsg = String.format(
+                "{\"type\":\"answer:result\",\"payload\":{\"round\":%d,\"correct\":%b,\"correctAnswer\":\"%s\",\"score\":%d}}",
+                round, result.isCorrect(), escapeJson(result.getCorrectAnswer()), result.getGainedScore());
+        sessionManager.sendToUser(userId, resultMsg);
+
+        // 推送 score:update 给整个房间
+        String scoreMsg = String.format(
+                "{\"type\":\"score:update\",\"payload\":{\"hostScore\":%d,\"guestScore\":%d}}",
+                gameService.getHostScore(roomId), gameService.getGuestScore(roomId));
+        sessionManager.broadcastToRoom(roomId, scoreMsg);
+
+        // 检查游戏是否结束
+        if (gameService.isGameOver(roomId)) {
+            gameService.finishGame(roomId);
+            return;
+        }
+
+        // 推下一道题给另一位玩家
+        Long nextUser = gameService.getOtherPlayerId(roomId, userId);
+        if (nextUser != null) {
+            gameService.pushNextQuestion(roomId, nextUser);
         }
     }
 
     /** 给指定连接发送错误消息 */
     private void sendError(WebSocketSession session, String code, String message) {
+        if (session == null || !session.isOpen()) return;
         try {
             String errorMsg = String.format(
                     "{\"type\":\"error\",\"payload\":{\"code\":\"%s\",\"message\":\"%s\"}}",
@@ -144,5 +174,10 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
         } catch (IOException e) {
             log.error("Failed to send error message: {}", e.getMessage());
         }
+    }
+
+    private String escapeJson(String s) {
+        if (s == null) return "";
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 }

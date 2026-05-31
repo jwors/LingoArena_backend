@@ -13,8 +13,11 @@ import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry
  * 客户端通过这个地址建立 WebSocket 连接。
  *
  * 配置了 JwtHandshakeInterceptor 在握手阶段验证 JWT token。
- * 注意：roomId 通过 query parameter 传递（?roomId=123&token=xxx），
+ * 注意：roomId/roomCode 通过 query parameter 传递，
  * 而不是 URL 路径变量，因为 Spring 原生 WebSocket 注册不支持 {roomId} 模板。
+ * 支持两种格式：
+ * - 数字 ID：ws://host/ws/room?roomId=123&token=xxx
+ * - 房间码：ws://host/ws/room?roomCode=ABC123&token=xxx
  */
 @Configuration
 @EnableWebSocket

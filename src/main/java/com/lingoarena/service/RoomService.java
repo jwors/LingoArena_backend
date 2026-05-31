@@ -87,8 +87,9 @@ public class RoomService {
                     ErrorCode.ROOM_FULL.getMessage());
         }
         if (room.getStatus() != RoomStatus.WAITING) {
-            throw new BusinessException(ErrorCode.ROOM_ALREADY_STARTED.getCode(),
-                    ErrorCode.ROOM_ALREADY_STARTED.getMessage());
+            String message = room.getStatus() == RoomStatus.CANCELLED
+                    ? "房间已取消" : ErrorCode.ROOM_ALREADY_STARTED.getMessage();
+            throw new BusinessException(ErrorCode.ROOM_ALREADY_STARTED.getCode(), message);
         }
 
         User guest = userRepository.findById(guestId)
