@@ -2,6 +2,7 @@ package com.lingoarena.service;
 
 import com.lingoarena.dto.request.CreateRoomRequest;
 import com.lingoarena.dto.response.RoomResponse;
+import com.lingoarena.engine.GameManager;
 import com.lingoarena.entity.GameRoom;
 import com.lingoarena.entity.User;
 import com.lingoarena.entity.Wordbook;
@@ -13,6 +14,7 @@ import com.lingoarena.mapper.GameRoomMapper;
 import com.lingoarena.repository.GameRoomRepository;
 import com.lingoarena.repository.UserRepository;
 import com.lingoarena.repository.WordbookRepository;
+import com.lingoarena.websocket.WebSocketSessionManager;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -46,6 +48,8 @@ public class RoomService {
     private final UserRepository userRepository;
     private final WordbookRepository wordbookRepository;
     private final GameRoomMapper gameRoomMapper;
+    private final WebSocketSessionManager sessionManager;
+    private final GameManager gameManager;
     private final SecureRandom random = new SecureRandom();
 
     /** 创建房间，返回房间信息（含 6 位房间码） */
@@ -113,6 +117,45 @@ public class RoomService {
             gameRoomRepository.save(room);
             log.info("Room {} cancelled (abandoned)", roomId);
         }
+    }
+
+    /**
+     * 玩家退出房间。
+     *
+     * 玩家主动点击退出按钮时调用。退出后房间直接销毁（设为 CANCELLED），
+     * 所有 WebSocket 连接断开。游戏中退出会先清理游戏状态。
+     */
+    @Transactional
+    public void leaveRoom(Long roomId, Long userId) {
+        GameRoom room = gameRoomRepository.findById(roomId)
+                .orElseThrow(() -> new BusinessException(ErrorCode.ROOM_NOT_FOUND.getCode(),
+                        ErrorCode.ROOM_NOT_FOUND.getMessage()));
+
+        // 检查用户是否属于这个房间
+        boolean isHost = room.getHost().getId().equals(userId);
+        boolean isGuest = room.getGuest() != null && room.getGuest().getId().equals(userId);
+        if (!isHost && !isGuest) {
+            throw new BusinessException("NOT_IN_ROOM", "你不在这个房间里");
+        }
+
+        // 如果游戏中，清理游戏状态
+        if (room.getStatus() == RoomStatus.PLAYING) {
+            gameManager.cleanupGame(roomId);
+        }
+
+        // 广播玩家离开消息给仍在房间内的连接
+        String leaveMsg = String.format(
+                "{\"type\":\"player:left\",\"payload\":{\"userId\":%d}}", userId);
+        sessionManager.broadcastToRoom(roomId, leaveMsg);
+
+        // 销毁房间
+        room.setStatus(RoomStatus.CANCELLED);
+        gameRoomRepository.save(room);
+
+        // 断开该房间所有 WebSocket 连接
+        sessionManager.closeRoomConnections(roomId);
+
+        log.info("User {} left room {}, room cancelled", userId, roomId);
     }
 
     /**

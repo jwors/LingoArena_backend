@@ -2,6 +2,7 @@ package com.lingoarena.websocket;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.WebSocketSession;
 
 import java.io.IOException;
@@ -95,4 +96,26 @@ public class WebSocketSessionManager {
     public Long getRoomIdFromSession(WebSocketSession session) {
         return (Long) session.getAttributes().get("roomId");
     }
-}
+
+    /**
+     * 关闭房间所有 WebSocket 连接并清理缓存。
+     * 用于玩家退出房间时，断开房间内所有人的连接。
+     */
+    public void closeRoomConnections(Long roomId) {
+        Set<WebSocketSession> sessions = roomSessions.remove(roomId);
+        if (sessions == null) return;
+
+        for (WebSocketSession session : sessions) {
+            Long userId = getUserIdFromSession(session);
+            if (userId != null) {
+                userSessions.remove(userId, session);
+            }
+            if (session.isOpen()) {
+                try {
+                    session.close(CloseStatus.NORMAL);
+                } catch (IOException e) {
+                    log.error("Failed to close session {}: {}", session.getId(), e.getMessage());
+                }
+            }
+        }
+    }

@@ -47,6 +47,15 @@ public class RoomController {
         return ResponseEntity.ok(Map.of("room", roomService.getRoom(id)));
     }
 
+    /** 退出房间（玩家主动退出，房间直接销毁） */
+    @PostMapping("/{id}/leave")
+    public ResponseEntity<Void> leave(
+            @PathVariable Long id,
+            @AuthenticationPrincipal Long userId) {
+        roomService.leaveRoom(id, userId);
+        return ResponseEntity.ok().build();
+    }
+
     /** 房主开始游戏（需要双方都已准备） */
     @PostMapping("/{id}/start")
     public ResponseEntity<Map<String, String>> start(

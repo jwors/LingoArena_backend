@@ -6,7 +6,8 @@
 REST API（房间管理）                 WebSocket（游戏阶段）
 ────────────────────────────────────────────────────────
 POST /api/rooms                     opponent:status（连接/断开/准备）
-POST /api/rooms/join                player_ready（上行）
+POST /api/rooms/join                player:left（玩家退出）
+POST /api/rooms/{id}/leave          player_ready（上行）
 POST /api/rooms/{id}/start          submit_answer（上行）
 GET  /api/rooms/{id}                answer:result
                                     score:update
@@ -22,6 +23,7 @@ GET  /api/rooms/{id}                answer:result
 | type | 触发时机 | 发给谁 | payload |
 |---|---|---|---|
 | `opponent:status` | 玩家连上/断开/准备 | 全房间广播 | `{userId, status:"connected"|"disconnected"|"ready", nickname?}` |
+| `player:left` | 有玩家主动退出房间 | 全房间广播 | `{userId}` |
 | `game:start` | 房主调 start 接口 | 全房间广播 | `{totalRounds, gameMode}` |
 | `question:new` | 轮到你答题 | 仅答题者 | `{round, questionType, content, options}` |
 | `answer:result` | 提交答案后 | 仅答题者 | `{round, correct, correctAnswer, score}` |
@@ -60,7 +62,29 @@ GET  /api/rooms/{id}                answer:result
    → 全房间收到 game:end {winnerId, hostScore, guestScore}
 ```
 
+## 退出房间
+
+任何时候玩家可点击退出按钮，调用 `POST /api/rooms/{id}/leave`：
+
+```
+1. 客户端调 POST /api/rooms/{id}/leave
+2. 服务端：
+   a. 校验用户属于该房间
+   b. 如正在游戏，清理游戏状态
+   c. 广播 player:left {userId} 给对方
+   d. 房间状态 → CANCELLED
+   e. 断开该房间所有 WS 连接
+3. 对方收到 player:left → 跳转离开
+```
+
 ## 变更记录
+
+### 2026-06-01
+
+- **新增** `POST /api/rooms/{id}/leave` REST 端点，玩家主动退出房间
+- **新增** WS 消息类型 `player:left`，通知对手有玩家退出
+- **新增** 退出逻辑：房间直接销毁（CANCELLED），断开所有 WS 连接
+- **修复** 游戏中退出时清理 GameManager 状态
 
 ### 2026-05-31
 
