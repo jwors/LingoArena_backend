@@ -1,13 +1,16 @@
 package com.lingoarena.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lingoarena.dto.websocket.*;
 import com.lingoarena.engine.GameManager;
 import com.lingoarena.engine.QuestionGenerator;
 import com.lingoarena.engine.ScoringEngine;
 import com.lingoarena.entity.*;
+import com.lingoarena.enums.GameMode;
 import com.lingoarena.enums.RoomStatus;
 import com.lingoarena.exception.BusinessException;
 import com.lingoarena.exception.ErrorCode;
-import com.lingoarena.repository.*;
+import com.lingoarena.repository.GameRoomRepository;
 import com.lingoarena.websocket.WebSocketSessionManager;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
@@ -23,7 +26,7 @@ import java.util.List;
  * 游戏业务逻辑的编排层：
  * 1. 开始游戏前校验条件
  * 2. 调用 GameManager 处理游戏核心逻辑
- * 3. 通过 WebSocket 推送游戏消息
+ * 3. 通过 WebSocket 推送游戏消息（DTO + ObjectMapper 序列化）
  * 4. 游戏结束后持久化结果到数据库
  */
 @Slf4j
@@ -36,9 +39,38 @@ public class GameService {
     private final ScoringEngine scoringEngine;
     private final WordbookService wordbookService;
     private final WebSocketSessionManager sessionManager;
+    private final ObjectMapper objectMapper;
+
+    // ========== 消息推送辅助 ==========
+
+    /** 向房间广播消息 */
+    private void broadcast(Long roomId, String type, Object payload) {
+        try {
+            String json = objectMapper.writeValueAsString(new WebSocketMessage<>(type, payload));
+            sessionManager.broadcastToRoom(roomId, json);
+        } catch (Exception e) {
+            log.error("Failed to serialize WS broadcast: type={}, roomId={}", type, roomId, e);
+        }
+    }
+
+    /** 向指定用户发送消息 */
+    private void sendToUser(Long userId, String type, Object payload) {
+        try {
+            String json = objectMapper.writeValueAsString(new WebSocketMessage<>(type, payload));
+            sessionManager.sendToUser(userId, json);
+        } catch (Exception e) {
+            log.error("Failed to serialize WS message: type={}, userId={}", type, userId, e);
+        }
+    }
+
+    private String serializeGameMode(GameMode mode) {
+        return mode == GameMode.RACE ? "rush" : "turn_based";
+    }
+
+    // ========== 游戏生命周期 ==========
 
     /**
-     * 开始游戏（由房主通过 REST 触发）。
+     * 开始游戏（由房主触发，可从 REST 或 WS 调用）。
      */
     @Transactional
     public void startGame(Long roomId, Long hostId) {
@@ -73,11 +105,11 @@ public class GameService {
         room.setStartedAt(LocalDateTime.now());
         gameRoomRepository.save(room);
 
-        // 广播 game:start
-        String startMsg = String.format(
-                "{\"type\":\"game:start\",\"payload\":{\"totalRounds\":%d,\"gameMode\":\"%s\"}}",
-                room.getTotalRounds(), room.getGameMode().name());
-        sessionManager.broadcastToRoom(roomId, startMsg);
+        // 广播 game:start（DTO 序列化）
+        broadcast(roomId, "game:start", GameStartMessage.builder()
+                .totalRounds(room.getTotalRounds())
+                .gameMode(serializeGameMode(room.getGameMode()))
+                .build());
 
         // 推送第一道题给房主
         pushNextQuestion(roomId, room.getHost().getId());
@@ -88,32 +120,33 @@ public class GameService {
 
     /**
      * 从队列弹出下一道题并推送给指定用户。
-     * 返回 true 表示还有题，false 表示已无题。
+     * 启动倒计时（含每秒 tick 推送）。
      */
     public boolean pushNextQuestion(Long roomId, Long userId) {
         QuestionGenerator.Question q = gameManager.popNextQuestion(roomId, userId);
         if (q == null) return false;
 
         int round = gameManager.getCurrentRound(roomId);
-        String typeName = q.getType().name().toLowerCase();
-        String content = q.getWord().getChinese();
 
-        // 构建 options（选择题有选项，拼写题为 null）
-        String optionsJson = "null";
-        if (q.getOptions() != null) {
-            StringBuilder sb = new StringBuilder("[");
-            for (int i = 0; i < q.getOptions().size(); i++) {
-                if (i > 0) sb.append(",");
-                sb.append("\"").append(escapeJson(q.getOptions().get(i))).append("\"");
-            }
-            sb.append("]");
-            optionsJson = sb.toString();
-        }
+        // question:new（DTO 序列化）
+        sendToUser(userId, "question:new", NewQuestionMessage.builder()
+                .round(round)
+                .questionType(q.getType().name().toLowerCase())
+                .chinese(q.getWord().getChinese())
+                .options(q.getOptions())
+                .timeLimit(GameManager.DEFAULT_TIME_LIMIT_SECONDS)
+                .build());
 
-        String questionMsg = String.format(
-                "{\"type\":\"question:new\",\"payload\":{\"round\":%d,\"questionType\":\"%s\",\"content\":\"%s\",\"options\":%s}}",
-                round, typeName, escapeJson(content), optionsJson);
-        sessionManager.sendToUser(userId, questionMsg);
+        // 广播 turn:start
+        broadcast(roomId, "turn:start", TurnStartMessage.builder()
+                .currentPlayerId(userId)
+                .build());
+
+        // 启动倒计时（每秒 tick + 超时回调）
+        gameManager.startRoundTimer(roomId, userId, GameManager.DEFAULT_TIME_LIMIT_SECONDS,
+                timeLeft -> broadcast(roomId, "timer:tick", new TimerTickMessage(timeLeft)),
+                () -> handleRoundTimeout(roomId, userId));
+
         return true;
     }
 
@@ -133,6 +166,64 @@ public class GameService {
 
         return gameManager.checkAnswer(roomId, userId, answer);
     }
+
+    /** 处理答题后的 WS 消息推送（answer:result + score:update） */
+    public void handleAnswerResult(Long roomId, Long userId, GameManager.AnswerCheckResult result) {
+        // answer:result → 仅答题者
+        sendToUser(userId, "answer:result", RoundResultMessage.builder()
+                .correct(result.isCorrect())
+                .playerId(userId)
+                .answer(result.getCorrectAnswer())
+                .build());
+
+        // score:update → 全房间
+        broadcast(roomId, "score:update", ScoreUpdateMessage.builder()
+                .scores(gameManager.getScores(roomId))
+                .build());
+
+        // 广播 opponent:status {submitted} 通知对手已提交
+        broadcast(roomId, "opponent:status", OpponentStatusMessage.builder()
+                .userId(userId)
+                .status("submitted")
+                .build());
+
+        // 取消倒计时
+        gameManager.cancelRoundTimer(roomId);
+    }
+
+    /**
+     * 处理超时。
+     * 超时玩家视为答错（0 分），直接推进游戏。
+     */
+    private void handleRoundTimeout(Long roomId, Long userId) {
+        log.info("Round timeout: roomId={}, userId={}", roomId, userId);
+
+        // 通知该用户超时
+        sendToUser(userId, "answer:result", RoundResultMessage.builder()
+                .correct(false)
+                .playerId(userId)
+                .answer("timeout")
+                .build());
+
+        // 更新分数（0 分不扣分）
+        broadcast(roomId, "score:update", ScoreUpdateMessage.builder()
+                .scores(gameManager.getScores(roomId))
+                .build());
+
+        // 检查游戏是否结束
+        if (gameManager.isGameOver(roomId)) {
+            finishGame(roomId);
+            return;
+        }
+
+        // 推下一题给另一位玩家
+        Long nextUser = gameManager.getOtherPlayerId(roomId, userId);
+        if (nextUser != null) {
+            pushNextQuestion(roomId, nextUser);
+        }
+    }
+
+    // ========== 查询方法 ==========
 
     /** 检查双方是否已作答 */
     public boolean bothAnswered(Long roomId, int round) {
@@ -174,6 +265,8 @@ public class GameService {
         return gameManager.getOtherPlayerId(roomId, userId);
     }
 
+    // ========== 游戏结束 ==========
+
     /** 结束游戏，写入数据库，广播 game:end */
     @Transactional
     public void finishGame(Long roomId) {
@@ -200,27 +293,17 @@ public class GameService {
 
         gameRoomRepository.save(room);
 
-        // 广播 game:end
-        String winnerIdStr = winnerId != null ? String.valueOf(winnerId) : "null";
-        String endMsg = String.format(
-                "{\"type\":\"game:end\",\"payload\":{\"winnerId\":%s,\"hostScore\":%d,\"guestScore\":%d}}",
-                winnerIdStr, hostScore, guestScore);
-        sessionManager.broadcastToRoom(roomId, endMsg);
+        // 广播 game:end（DTO 序列化，含 stats）
+        broadcast(roomId, "game:end", GameOverMessage.builder()
+                .winner(winnerId)
+                .scores(gameManager.getScores(roomId))
+                .stats(gameManager.getPlayerStats(roomId))
+                .build());
 
         // 清理游戏状态
         gameManager.cleanupGame(roomId);
 
         log.info("Game finished: roomId={}, host={}, guest={}, winner={}",
                 roomId, hostScore, guestScore, winnerId);
-    }
-
-    /** JSON 字符串转义 */
-    private String escapeJson(String s) {
-        if (s == null) return "";
-        return s.replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t");
     }
 }

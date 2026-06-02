@@ -5,35 +5,16 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-import java.util.List;
-
+/**
+ * 答题结果消息 payload。
+ * 格式：{ "correct": true, "playerId": 1, "answer": "apple" }
+ */
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
 public class RoundResultMessage {
-    private int round;
-    private String correctAnswer;
-    private List<PlayerResult> results;
-    private List<PlayerScore> scores;
-
-    @Data
-    @NoArgsConstructor
-    @AllArgsConstructor
-    @Builder
-    public static class PlayerResult {
-        private long userId;
-        private String answer;
-        private boolean isCorrect;
-        private int timeSpentMs;
-    }
-
-    @Data
-    @NoArgsConstructor
-    @AllArgsConstructor
-    @Builder
-    public static class PlayerScore {
-        private long userId;
-        private int score;
-    }
+    private boolean correct;
+    private Long playerId;
+    private String answer;
 }

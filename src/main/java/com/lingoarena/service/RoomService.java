@@ -1,7 +1,11 @@
 package com.lingoarena.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lingoarena.dto.request.CreateRoomRequest;
 import com.lingoarena.dto.response.RoomResponse;
+import com.lingoarena.dto.websocket.RoomClosedMessage;
+import com.lingoarena.dto.websocket.RoomJoinedMessage;
+import com.lingoarena.dto.websocket.WebSocketMessage;
 import com.lingoarena.engine.GameManager;
 import com.lingoarena.entity.GameRoom;
 import com.lingoarena.entity.User;
@@ -23,7 +27,9 @@ import org.springframework.stereotype.Service;
 
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 房间服务。
@@ -50,6 +56,7 @@ public class RoomService {
     private final GameRoomMapper gameRoomMapper;
     private final WebSocketSessionManager sessionManager;
     private final GameManager gameManager;
+    private final ObjectMapper objectMapper;
     private final SecureRandom random = new SecureRandom();
 
     /** 创建房间，返回房间信息（含 6 位房间码） */
@@ -102,7 +109,97 @@ public class RoomService {
         room.setGuest(guest);
         room = gameRoomRepository.save(room);
 
+        // 广播 room:joined 通知房主有玩家加入
+        broadcastRoomJoined(room);
+
         return gameRoomMapper.toResponse(room);
+    }
+
+    /**
+     * 构建 room:joined 消息并广播给房间已有连接。
+     */
+    private void broadcastRoomJoined(GameRoom room) {
+        try {
+            List<RoomJoinedMessage.PlayerInfo> players = new ArrayList<>();
+            players.add(RoomJoinedMessage.PlayerInfo.builder()
+                    .id(room.getHost().getId())
+                    .nickname(room.getHost().getNickname())
+                    .isHost(true)
+                    .build());
+            if (room.getGuest() != null) {
+                players.add(RoomJoinedMessage.PlayerInfo.builder()
+                        .id(room.getGuest().getId())
+                        .nickname(room.getGuest().getNickname())
+                        .isHost(false)
+                        .build());
+            }
+
+            RoomJoinedMessage.WordBookInfo wb = room.getWordbook() != null
+                    ? RoomJoinedMessage.WordBookInfo.builder()
+                        .id(room.getWordbook().getId())
+                        .name(room.getWordbook().getName())
+                        .build()
+                    : null;
+
+            RoomJoinedMessage payload = RoomJoinedMessage.builder()
+                    .players(players)
+                    .hostId(room.getHost().getId())
+                    .wordBook(wb)
+                    .roomCode(room.getRoomCode())
+                    .status(room.getStatus().name())
+                    .build();
+
+            String json = objectMapper.writeValueAsString(
+                    new WebSocketMessage<>("room:joined", payload));
+            sessionManager.broadcastToRoom(room.getId(), json);
+        } catch (Exception e) {
+            log.error("Failed to broadcast room:joined: roomId={}", room.getId(), e);
+        }
+    }
+
+    /** 构建 room:joined 消息并发送给指定用户（WS 连接时用） */
+    public void sendRoomJoined(Long roomId, Long userId) {
+        GameRoom room = gameRoomRepository.findById(roomId).orElse(null);
+        if (room == null) {
+            log.warn("Room not found for room:joined: roomId={}", roomId);
+            return;
+        }
+        try {
+            List<RoomJoinedMessage.PlayerInfo> players = new ArrayList<>();
+            players.add(RoomJoinedMessage.PlayerInfo.builder()
+                    .id(room.getHost().getId())
+                    .nickname(room.getHost().getNickname())
+                    .isHost(true)
+                    .build());
+            if (room.getGuest() != null) {
+                players.add(RoomJoinedMessage.PlayerInfo.builder()
+                        .id(room.getGuest().getId())
+                        .nickname(room.getGuest().getNickname())
+                        .isHost(false)
+                        .build());
+            }
+
+            RoomJoinedMessage.WordBookInfo wb = room.getWordbook() != null
+                    ? RoomJoinedMessage.WordBookInfo.builder()
+                        .id(room.getWordbook().getId())
+                        .name(room.getWordbook().getName())
+                        .build()
+                    : null;
+
+            RoomJoinedMessage payload = RoomJoinedMessage.builder()
+                    .players(players)
+                    .hostId(room.getHost().getId())
+                    .wordBook(wb)
+                    .roomCode(room.getRoomCode())
+                    .status(room.getStatus().name())
+                    .build();
+
+            String json = objectMapper.writeValueAsString(
+                    new WebSocketMessage<>("room:joined", payload));
+            sessionManager.sendToUser(userId, json);
+        } catch (Exception e) {
+            log.error("Failed to send room:joined: roomId={}, userId={}", roomId, userId, e);
+        }
     }
 
     /**
@@ -144,13 +241,26 @@ public class RoomService {
         }
 
         // 广播玩家离开消息给仍在房间内的连接
-        String leaveMsg = String.format(
-                "{\"type\":\"player:left\",\"payload\":{\"userId\":%d}}", userId);
-        sessionManager.broadcastToRoom(roomId, leaveMsg);
+        try {
+            String leaveMsg = objectMapper.writeValueAsString(
+                    new WebSocketMessage<>("player:left", Map.of("userId", userId)));
+            sessionManager.broadcastToRoom(roomId, leaveMsg);
+        } catch (Exception e) {
+            log.error("Failed to send player:left: roomId={}", roomId, e);
+        }
 
         // 销毁房间
         room.setStatus(RoomStatus.CANCELLED);
         gameRoomRepository.save(room);
+
+        // 广播 room:closed
+        try {
+            String closedMsg = objectMapper.writeValueAsString(
+                    new WebSocketMessage<>("room:closed", new RoomClosedMessage(roomId)));
+            sessionManager.broadcastToRoom(roomId, closedMsg);
+        } catch (Exception e) {
+            log.error("Failed to send room:closed: roomId={}", roomId, e);
+        }
 
         // 断开该房间所有 WebSocket 连接
         sessionManager.closeRoomConnections(roomId);

@@ -2,9 +2,10 @@ package com.lingoarena.websocket;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lingoarena.dto.websocket.*;
 import com.lingoarena.engine.GameManager;
 import com.lingoarena.service.GameService;
-import com.lingoarena.repository.UserRepository;
+import com.lingoarena.service.RoomService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -18,12 +19,15 @@ import java.io.IOException;
 /**
  * WebSocket 消息处理器。
  *
- * 处理游戏阶段的 WebSocket 消息：
- * - 连接/断开：通知对手状态变化
- * - player_ready：标记准备
- * - submit_answer：提交答案
+ * 处理房间阶段的 WebSocket 消息：
+ * - 连接时推送 room:joined（房间完整状态）
+ * - 连接/断开时广播 opponent:status
+ * - player_ready → player:ready_status
+ * - player:input → opponent:status typing（透传给对手）
+ * - submit_answer → 交 GameService 处理
+ * - game:start → 调 GameService（兼容 WS 触发）
  *
- * 房间管理和游戏开始由 REST API 处理。
+ * 所有消息使用 DTO + ObjectMapper 序列化，替代手拼 JSON。
  */
 @Slf4j
 @Component
@@ -32,7 +36,7 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
 
     private final WebSocketSessionManager sessionManager;
     private final GameService gameService;
-    private final UserRepository userRepository;
+    private final RoomService roomService;
     private final ObjectMapper objectMapper;
 
     /** 连接建立时调用 */
@@ -53,17 +57,17 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
 
         sessionManager.addSession(roomId, userId, session);
 
-        // 查询用户昵称，通知对手有人上线了
-        String nickname = userRepository.findById(userId)
-                .map(user -> user.getNickname())
-                .orElse("unknown");
-        String escapedNickname = nickname.replace("\\", "\\\\").replace("\"", "\\\"");
-        String statusMsg = String.format(
-                "{\"type\":\"opponent:status\",\"payload\":{\"userId\":%d,\"nickname\":\"%s\",\"status\":\"connected\"}}",
-                userId, escapedNickname);
-        sessionManager.broadcastToRoom(roomId, statusMsg);
+        // 发送 room:joined 给连接者（完整房间状态）
+        roomService.sendRoomJoined(roomId, userId);
 
-        log.info("User {} ({}) connected to room {}", userId, nickname, roomId);
+        // 广播 opponent:status {connected} 通知对手
+        broadcastToRoom(roomId, "opponent:status",
+                OpponentStatusMessage.builder()
+                        .userId(userId)
+                        .status("connected")
+                        .build());
+
+        log.info("User {} connected to room {}", userId, roomId);
     }
 
     /** 收到消息时调用 */
@@ -83,8 +87,10 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
             }
 
             switch (type) {
-                case "player_ready" -> handlePlayerReady(roomId, userId);
-                case "submit_answer" -> handleSubmitAnswer(roomId, userId, payload);
+                case "game:start" -> handleGameStart(roomId, userId);
+                case "player:ready" -> handlePlayerReady(roomId, userId);
+                case "player:input" -> handlePlayerInput(roomId, userId);
+                case "answer:submit" -> handleSubmitAnswer(roomId, userId, payload);
                 default -> sendError(session, "UNKNOWN_TYPE", "未知消息类型: " + type);
             }
         } catch (Exception e) {
@@ -106,27 +112,54 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
 
         sessionManager.removeSession(roomId, userId, session);
 
-        // 通知对手有人断线
-        String disconnectMsg = String.format(
-                "{\"type\":\"opponent:status\",\"payload\":{\"userId\":%d,\"status\":\"disconnected\"}}", userId);
-        sessionManager.broadcastToRoom(roomId, disconnectMsg);
+        // 广播 opponent:status {disconnected}
+        broadcastToRoom(roomId, "opponent:status",
+                OpponentStatusMessage.builder()
+                        .userId(userId)
+                        .status("disconnected")
+                        .build());
 
         log.info("User {} disconnected from room {}, status: {}", userId, roomId, status);
     }
 
-    /** 处理玩家准备 */
+    // ========== 消息处理 ==========
+
+    /** 处理 game:start（兼容 WS 触发） */
+    private void handleGameStart(Long roomId, Long userId) {
+        try {
+            gameService.startGame(roomId, userId);
+        } catch (Exception e) {
+            log.error("Game start failed: roomId={}, userId={}", roomId, userId, e);
+            WebSocketSession session = sessionManager.getUserSession(userId);
+            if (session != null) {
+                sendError(session, "GAME_START_FAILED", e.getMessage());
+            }
+        }
+    }
+
+    /** 处理玩家准备 → 广播 player:ready_status */
     private void handlePlayerReady(Long roomId, Long userId) {
         gameService.setPlayerReady(roomId, userId);
 
-        // 广播准备状态给房间所有人
-        String readyMsg = String.format(
-                "{\"type\":\"opponent:status\",\"payload\":{\"userId\":%d,\"status\":\"ready\"}}", userId);
-        sessionManager.broadcastToRoom(roomId, readyMsg);
+        broadcastToRoom(roomId, "player:ready_status",
+                PlayerReadyMessage.builder()
+                        .userId(userId)
+                        .ready(true)
+                        .build());
     }
 
-    /** 处理玩家提交答案 */
+    /** 处理输入状态提示 → 透传给对手 */
+    private void handlePlayerInput(Long roomId, Long userId) {
+        broadcastToRoom(roomId, "opponent:status",
+                OpponentStatusMessage.builder()
+                        .userId(userId)
+                        .status("typing")
+                        .build());
+    }
+
+    /** 处理提交答案 */
     private void handleSubmitAnswer(Long roomId, Long userId, JsonNode payload) {
-        int round = payload.get("round").asInt();
+        int round = gameService.getCurrentRound(roomId);
         String answer = payload.get("answer").asText();
         long timestamp = payload.has("timestamp") ? payload.get("timestamp").asLong() : System.currentTimeMillis();
 
@@ -138,17 +171,8 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        // 推送 answer:result 给答题者本人
-        String resultMsg = String.format(
-                "{\"type\":\"answer:result\",\"payload\":{\"round\":%d,\"correct\":%b,\"correctAnswer\":\"%s\",\"score\":%d}}",
-                round, result.isCorrect(), escapeJson(result.getCorrectAnswer()), result.getGainedScore());
-        sessionManager.sendToUser(userId, resultMsg);
-
-        // 推送 score:update 给整个房间
-        String scoreMsg = String.format(
-                "{\"type\":\"score:update\",\"payload\":{\"hostScore\":%d,\"guestScore\":%d}}",
-                gameService.getHostScore(roomId), gameService.getGuestScore(roomId));
-        sessionManager.broadcastToRoom(roomId, scoreMsg);
+        // 推送 answer:result + score:update + opponent:status submitted
+        gameService.handleAnswerResult(roomId, userId, result);
 
         // 检查游戏是否结束
         if (gameService.isGameOver(roomId)) {
@@ -163,21 +187,30 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
+    // ========== 消息发送辅助 ==========
+
+    /** 使用 DTO + ObjectMapper 广播消息 */
+    private void broadcastToRoom(Long roomId, String type, Object payload) {
+        try {
+            String json = objectMapper.writeValueAsString(new WebSocketMessage<>(type, payload));
+            sessionManager.broadcastToRoom(roomId, json);
+        } catch (Exception e) {
+            log.error("Failed to serialize WS message: type={}, roomId={}", type, roomId, e);
+        }
+    }
+
     /** 给指定连接发送错误消息 */
     private void sendError(WebSocketSession session, String code, String message) {
         if (session == null || !session.isOpen()) return;
         try {
-            String errorMsg = String.format(
-                    "{\"type\":\"error\",\"payload\":{\"code\":\"%s\",\"message\":\"%s\"}}",
-                    code, message);
-            session.sendMessage(new TextMessage(errorMsg));
+            String json = objectMapper.writeValueAsString(
+                    new WebSocketMessage<>("error", ErrorMessage.builder()
+                            .code(code)
+                            .message(message)
+                            .build()));
+            session.sendMessage(new TextMessage(json));
         } catch (IOException e) {
             log.error("Failed to send error message: {}", e.getMessage());
         }
-    }
-
-    private String escapeJson(String s) {
-        if (s == null) return "";
-        return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 }
