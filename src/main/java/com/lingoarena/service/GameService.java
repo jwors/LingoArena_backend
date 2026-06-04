@@ -19,6 +19,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 游戏服务。
@@ -293,11 +294,18 @@ public class GameService {
 
         gameRoomRepository.save(room);
 
-        // 广播 game:end（DTO 序列化，含 stats）
+        // 广播 game:end（DTO 序列化，含战绩）
+        Map<Long, GameOverMessage.PlayerStats> dtoStats = new java.util.HashMap<>();
+        gameManager.getPlayerStats(roomId).forEach((uid, ps) ->
+                dtoStats.put(uid, GameOverMessage.PlayerStats.builder()
+                        .correct(ps.getCorrect())
+                        .wrong(ps.getWrong())
+                        .avgTime(ps.getAvgTime())
+                        .build()));
         broadcast(roomId, "game:end", GameOverMessage.builder()
                 .winner(winnerId)
                 .scores(gameManager.getScores(roomId))
-                .stats(gameManager.getPlayerStats(roomId))
+                .stats(dtoStats)
                 .build());
 
         // 清理游戏状态
