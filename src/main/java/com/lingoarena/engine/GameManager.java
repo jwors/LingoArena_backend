@@ -139,18 +139,21 @@ public class GameManager {
             roomWrongCounts.put(roomId, new ConcurrentHashMap<>());
             roomResponseTimes.put(roomId, new ConcurrentHashMap<>());
 
-            // 也推入 Redis（用于跨实例扩展，暂保留）
-            gameStateRepository.pushAllQuestions(roomId, new ArrayList<>(questions));
-
-            // 初始化 Redis 房间状态
-            Map<String, Object> state = new HashMap<>();
-            state.put("status", RoomStatus.PLAYING.name());
-            state.put("currentRound", 1);
-            state.put("totalRounds", totalRounds);
-            state.put("gameMode", gameMode);
-            state.put("hostScore", 0);
-            state.put("guestScore", 0);
-            roomStateRepository.saveRoomState(roomId, state);
+            // Redis 缓存为可选；题目队列以内存为准，序列化 JPA 实体易失败，不得阻断开局
+            try {
+                gameStateRepository.pushAllQuestions(roomId, new ArrayList<>(questions));
+                Map<String, Object> state = new HashMap<>();
+                state.put("status", RoomStatus.PLAYING.name());
+                state.put("currentRound", 1);
+                state.put("totalRounds", totalRounds);
+                state.put("gameMode", gameMode);
+                state.put("hostScore", 0);
+                state.put("guestScore", 0);
+                roomStateRepository.saveRoomState(roomId, state);
+            } catch (Exception e) {
+                log.warn("Failed to persist game state to Redis for roomId={}, continuing in-memory: {}",
+                        roomId, e.getMessage());
+            }
 
             log.info("Game initialized: roomId={}, mode={}, rounds={}, questions={}",
                     roomId, gameMode, totalRounds, questions.size());
@@ -185,38 +188,68 @@ public class GameManager {
      * 同时更新分数和战绩统计。
      */
     public AnswerCheckResult checkAnswer(Long roomId, Long userId, String answer) {
-        String correctAnswer = pendingCorrectAnswers.remove(roomId + ":" + userId);
-        if (correctAnswer == null) {
-            return new AnswerCheckResult(false, 0, null, "没有待批改的题目");
+        ReentrantLock lock = getRoomLock(roomId);
+        lock.lock();
+        try {
+            String key = roomId + ":" + userId;
+            String correctAnswer = pendingCorrectAnswers.remove(key);
+            if (correctAnswer == null) {
+                return new AnswerCheckResult(false, 0, null, "没有待批改的题目");
+            }
+
+            boolean isCorrect = scoringEngine.checkAnswer(answer, correctAnswer);
+            int gainedScore = scoringEngine.calculateScore(isCorrect);
+            int round = roomCurrentRound.getOrDefault(roomId, 1);
+
+            Map<String, Object> answerData = new HashMap<>();
+            answerData.put("answer", answer);
+            answerData.put("isCorrect", isCorrect);
+            answerData.put("timestampMs", System.currentTimeMillis());
+            try {
+                gameStateRepository.saveAnswer(roomId, round, userId, answerData);
+            } catch (Exception e) {
+                log.warn("Failed to save answer to Redis: roomId={}, userId={}, {}", roomId, userId, e.getMessage());
+            }
+
+            if (roomHostId.getOrDefault(roomId, -1L).equals(userId)) {
+                roomHostScore.merge(roomId, gainedScore, Integer::sum);
+            } else {
+                roomGuestScore.merge(roomId, gainedScore, Integer::sum);
+            }
+
+            try {
+                roomStateRepository.updateField(roomId, "hostScore", roomHostScore.get(roomId));
+                roomStateRepository.updateField(roomId, "guestScore", roomGuestScore.get(roomId));
+            } catch (Exception e) {
+                log.warn("Failed to sync scores to Redis: roomId={}, {}", roomId, e.getMessage());
+            }
+
+            recordAnswer(roomId, userId, isCorrect);
+            recordResponseTime(roomId, userId);
+
+            return new AnswerCheckResult(isCorrect, gainedScore, correctAnswer, null);
+        } finally {
+            lock.unlock();
         }
+    }
 
-        boolean isCorrect = scoringEngine.checkAnswer(answer, correctAnswer);
-        int gainedScore = scoringEngine.calculateScore(isCorrect);
-        int round = roomCurrentRound.getOrDefault(roomId, 1);
-
-        // 保存答案到 Redis（供 bothAnswered 判断）
-        Map<String, Object> answerData = new HashMap<>();
-        answerData.put("answer", answer);
-        answerData.put("isCorrect", isCorrect);
-        answerData.put("timestampMs", System.currentTimeMillis());
-        gameStateRepository.saveAnswer(roomId, round, userId, answerData);
-
-        // 更新内存分数
-        if (roomHostId.getOrDefault(roomId, -1L).equals(userId)) {
-            roomHostScore.merge(roomId, gainedScore, Integer::sum);
-        } else {
-            roomGuestScore.merge(roomId, gainedScore, Integer::sum);
+    /**
+     * 超时处理：若该题尚未作答则标记为超时并返回 true；已作答则返回 false。
+     */
+    public boolean consumeTimeout(Long roomId, Long userId) {
+        ReentrantLock lock = getRoomLock(roomId);
+        lock.lock();
+        try {
+            String key = roomId + ":" + userId;
+            if (!pendingCorrectAnswers.containsKey(key)) {
+                return false;
+            }
+            pendingCorrectAnswers.remove(key);
+            questionPushTimes.remove(key);
+            return true;
+        } finally {
+            lock.unlock();
         }
-
-        // 同步到 Redis
-        roomStateRepository.updateField(roomId, "hostScore", roomHostScore.get(roomId));
-        roomStateRepository.updateField(roomId, "guestScore", roomGuestScore.get(roomId));
-
-        // 记录战绩
-        recordAnswer(roomId, userId, isCorrect);
-        recordResponseTime(roomId, userId);
-
-        return new AnswerCheckResult(isCorrect, gainedScore, correctAnswer, null);
     }
 
     /** 本轮双方都已答完？ */

@@ -88,7 +88,7 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
 
             switch (type) {
                 case "game:start" -> handleGameStart(roomId, userId);
-                case "player:ready" -> handlePlayerReady(roomId, userId);
+                case "player:ready" -> handlePlayerReadyToggle(roomId, userId, payload);
                 case "player:unready" -> handlePlayerUnready(roomId, userId);
                 case "player:input" -> handlePlayerInput(roomId, userId);
                 case "answer:submit" -> handleSubmitAnswer(roomId, userId, payload);
@@ -135,6 +135,16 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
             if (session != null) {
                 sendError(session, "GAME_START_FAILED", e.getMessage());
             }
+        }
+    }
+
+    /** 处理玩家准备/取消准备 → 广播 player:ready_status */
+    private void handlePlayerReadyToggle(Long roomId, Long userId, JsonNode payload) {
+        boolean ready = payload == null || !payload.has("ready") || payload.get("ready").asBoolean(true);
+        if (ready) {
+            handlePlayerReady(roomId, userId);
+        } else {
+            handlePlayerUnready(roomId, userId);
         }
     }
 

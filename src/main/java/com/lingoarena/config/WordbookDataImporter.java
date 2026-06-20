@@ -28,6 +28,9 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class WordbookDataImporter implements ApplicationListener<ApplicationReadyEvent> {
 
+    /** 回合制默认 10 轮需要 20 题，种子数据至少满足此数量 */
+    private static final int MIN_WORDS_PER_WORDBOOK = 20;
+
     private static final Map<WordbookLevel, String> DATA_FILES = Map.of(
             WordbookLevel.CET4, "data/cet4.json",
             WordbookLevel.CET6, "data/cet6.json",
@@ -54,8 +57,9 @@ public class WordbookDataImporter implements ApplicationListener<ApplicationRead
         }
 
         Wordbook wordbook = wordbookOpt.get();
-        if (wordRepository.countByWordbookId(wordbook.getId()) > 0) {
-            log.debug("Wordbook {} already has words, skip import", level);
+        long existing = wordRepository.countByWordbookId(wordbook.getId());
+        if (existing >= MIN_WORDS_PER_WORDBOOK) {
+            log.debug("Wordbook {} has {} words, skip import", level, existing);
             return;
         }
 
@@ -63,6 +67,12 @@ public class WordbookDataImporter implements ApplicationListener<ApplicationRead
         if (entries.isEmpty()) {
             log.warn("No word entries in {}, skip import for {}", resourcePath, level);
             return;
+        }
+
+        if (existing > 0) {
+            log.info("Wordbook {} has only {} words (< {}), reimporting from {}",
+                    level, existing, MIN_WORDS_PER_WORDBOOK, resourcePath);
+            wordRepository.deleteByWordbookId(wordbook.getId());
         }
 
         for (int i = 0; i < entries.size(); i++) {
