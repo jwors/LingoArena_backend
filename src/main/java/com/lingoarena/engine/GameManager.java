@@ -252,6 +252,11 @@ public class GameManager {
         }
     }
 
+    /** 内存中是否有进行中的游戏（与 DB 状态可能短暂不一致） */
+    public boolean isGameInProgress(Long roomId) {
+        return roomQuestions.containsKey(roomId);
+    }
+
     /** 本轮双方都已答完？ */
     public boolean bothAnswered(Long roomId, int round) {
         Map<Object, Object> answers = gameStateRepository.getRoundAnswers(roomId, round);

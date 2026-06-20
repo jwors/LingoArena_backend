@@ -170,7 +170,7 @@ public class GameService {
                 .orElseThrow(() -> new BusinessException(ErrorCode.ROOM_NOT_FOUND.getCode(),
                         ErrorCode.ROOM_NOT_FOUND.getMessage()));
 
-        if (room.getStatus() != RoomStatus.PLAYING) {
+        if (room.getStatus() != RoomStatus.PLAYING && !gameManager.isGameInProgress(roomId)) {
             throw new BusinessException(ErrorCode.GAME_NOT_STARTED.getCode(),
                     ErrorCode.GAME_NOT_STARTED.getMessage());
         }
