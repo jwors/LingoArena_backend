@@ -90,6 +90,15 @@ public class GameManager {
         return bothReady;
     }
 
+    /** 取消玩家准备 */
+    public void removePlayerReady(Long roomId, Long userId) {
+        Set<Long> ready = roomReadyPlayers.get(roomId);
+        if (ready != null) {
+            ready.remove(userId);
+            log.debug("Player unready: roomId={}, userId={}", roomId, userId);
+        }
+    }
+
     public boolean areBothReady(Long roomId) {
         Set<Long> ready = roomReadyPlayers.get(roomId);
         return ready != null && ready.size() >= 2;

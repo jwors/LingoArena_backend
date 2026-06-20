@@ -26,6 +26,7 @@ public enum ErrorCode {
 
     // ===== 词库相关 =====
     WORDBOOK_NOT_FOUND("WORDBOOK_NOT_FOUND", "词库不存在"),
+    WORDBOOK_INSUFFICIENT_WORDS("WORDBOOK_INSUFFICIENT_WORDS", "词库单词数不足，无法开始游戏"),
 
     // ===== 游戏相关 =====
     GAME_NOT_STARTED("GAME_NOT_STARTED", "游戏未开始"),

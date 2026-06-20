@@ -18,7 +18,7 @@ import java.io.IOException;
 
 /**
  * WebSocket 消息处理器。
- *
+ *doc
  * 处理房间阶段的 WebSocket 消息：
  * - 连接时推送 room:joined（房间完整状态）
  * - 连接/断开时广播 opponent:status
@@ -89,6 +89,7 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
             switch (type) {
                 case "game:start" -> handleGameStart(roomId, userId);
                 case "player:ready" -> handlePlayerReady(roomId, userId);
+                case "player:unready" -> handlePlayerUnready(roomId, userId);
                 case "player:input" -> handlePlayerInput(roomId, userId);
                 case "answer:submit" -> handleSubmitAnswer(roomId, userId, payload);
                 default -> sendError(session, "UNKNOWN_TYPE", "未知消息类型: " + type);
@@ -145,6 +146,17 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
                 PlayerReadyMessage.builder()
                         .userId(userId)
                         .ready(true)
+                        .build());
+    }
+
+    /** 处理玩家取消准备 → 广播 player:ready_status */
+    private void handlePlayerUnready(Long roomId, Long userId) {
+        gameService.cancelPlayerReady(roomId, userId);
+
+        broadcastToRoom(roomId, "player:ready_status",
+                PlayerReadyMessage.builder()
+                        .userId(userId)
+                        .ready(false)
                         .build());
     }
 
@@ -208,8 +220,8 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
                             .code(code)
                             .message(message)
                             .build()));
-            session.sendMessage(new TextMessage(json));
-        } catch (IOException e) {
+            sessionManager.sendToSession(session, json);
+        } catch (Exception e) {
             log.error("Failed to send error message: {}", e.getMessage());
         }
     }

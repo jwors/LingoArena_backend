@@ -98,6 +98,15 @@ public class GameService {
         }
 
         List<Word> words = wordbookService.getAllWords(room.getWordbook().getId());
+        int requiredQuestions = room.getGameMode() == GameMode.RACE
+                ? room.getTotalRounds()
+                : room.getTotalRounds() * 2;
+        if (words.size() < requiredQuestions) {
+            throw new BusinessException(
+                    ErrorCode.WORDBOOK_INSUFFICIENT_WORDS.getCode(),
+                    ErrorCode.WORDBOOK_INSUFFICIENT_WORDS.getMessage()
+                            + "：需要 " + requiredQuestions + " 个，仅有 " + words.size() + " 个");
+        }
 
         gameManager.startGame(roomId, words, room.getTotalRounds(), room.getGameMode().name(),
                 room.getHost().getId(), room.getGuest().getId());
@@ -249,6 +258,11 @@ public class GameService {
     /** 标记玩家已准备 */
     public void setPlayerReady(Long roomId, Long userId) {
         gameManager.setPlayerReady(roomId, userId);
+    }
+
+    /** 取消玩家准备 */
+    public void cancelPlayerReady(Long roomId, Long userId) {
+        gameManager.removePlayerReady(roomId, userId);
     }
 
     /** 获取房主分数 */

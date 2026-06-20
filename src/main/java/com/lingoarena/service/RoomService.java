@@ -120,35 +120,7 @@ public class RoomService {
      */
     private void broadcastRoomJoined(GameRoom room) {
         try {
-            List<RoomJoinedMessage.PlayerInfo> players = new ArrayList<>();
-            players.add(RoomJoinedMessage.PlayerInfo.builder()
-                    .id(room.getHost().getId())
-                    .nickname(room.getHost().getNickname())
-                    .isHost(true)
-                    .build());
-            if (room.getGuest() != null) {
-                players.add(RoomJoinedMessage.PlayerInfo.builder()
-                        .id(room.getGuest().getId())
-                        .nickname(room.getGuest().getNickname())
-                        .isHost(false)
-                        .build());
-            }
-
-            RoomJoinedMessage.WordBookInfo wb = room.getWordbook() != null
-                    ? RoomJoinedMessage.WordBookInfo.builder()
-                        .id(room.getWordbook().getId())
-                        .name(room.getWordbook().getName())
-                        .build()
-                    : null;
-
-            RoomJoinedMessage payload = RoomJoinedMessage.builder()
-                    .players(players)
-                    .hostId(room.getHost().getId())
-                    .wordBook(wb)
-                    .roomCode(room.getRoomCode())
-                    .status(room.getStatus().name())
-                    .build();
-
+            RoomJoinedMessage payload = buildRoomJoinedMessage(room);
             String json = objectMapper.writeValueAsString(
                     new WebSocketMessage<>("room:joined", payload));
             sessionManager.broadcastToRoom(room.getId(), json);
@@ -158,48 +130,52 @@ public class RoomService {
     }
 
     /** 构建 room:joined 消息并发送给指定用户（WS 连接时用） */
+    @Transactional
     public void sendRoomJoined(Long roomId, Long userId) {
-        GameRoom room = gameRoomRepository.findById(roomId).orElse(null);
+        GameRoom room = gameRoomRepository.findByIdWithDetails(roomId).orElse(null);
         if (room == null) {
             log.warn("Room not found for room:joined: roomId={}", roomId);
             return;
         }
         try {
-            List<RoomJoinedMessage.PlayerInfo> players = new ArrayList<>();
-            players.add(RoomJoinedMessage.PlayerInfo.builder()
-                    .id(room.getHost().getId())
-                    .nickname(room.getHost().getNickname())
-                    .isHost(true)
-                    .build());
-            if (room.getGuest() != null) {
-                players.add(RoomJoinedMessage.PlayerInfo.builder()
-                        .id(room.getGuest().getId())
-                        .nickname(room.getGuest().getNickname())
-                        .isHost(false)
-                        .build());
-            }
-
-            RoomJoinedMessage.WordBookInfo wb = room.getWordbook() != null
-                    ? RoomJoinedMessage.WordBookInfo.builder()
-                        .id(room.getWordbook().getId())
-                        .name(room.getWordbook().getName())
-                        .build()
-                    : null;
-
-            RoomJoinedMessage payload = RoomJoinedMessage.builder()
-                    .players(players)
-                    .hostId(room.getHost().getId())
-                    .wordBook(wb)
-                    .roomCode(room.getRoomCode())
-                    .status(room.getStatus().name())
-                    .build();
-
+            RoomJoinedMessage payload = buildRoomJoinedMessage(room);
             String json = objectMapper.writeValueAsString(
                     new WebSocketMessage<>("room:joined", payload));
             sessionManager.sendToUser(userId, json);
         } catch (Exception e) {
             log.error("Failed to send room:joined: roomId={}, userId={}", roomId, userId, e);
         }
+    }
+
+    private RoomJoinedMessage buildRoomJoinedMessage(GameRoom room) {
+        List<RoomJoinedMessage.PlayerInfo> players = new ArrayList<>();
+        players.add(RoomJoinedMessage.PlayerInfo.builder()
+                .id(room.getHost().getId())
+                .nickname(room.getHost().getNickname())
+                .isHost(true)
+                .build());
+        if (room.getGuest() != null) {
+            players.add(RoomJoinedMessage.PlayerInfo.builder()
+                    .id(room.getGuest().getId())
+                    .nickname(room.getGuest().getNickname())
+                    .isHost(false)
+                    .build());
+        }
+
+        RoomJoinedMessage.WordBookInfo wb = room.getWordbook() != null
+                ? RoomJoinedMessage.WordBookInfo.builder()
+                    .id(room.getWordbook().getId())
+                    .name(room.getWordbook().getName())
+                    .build()
+                : null;
+
+        return RoomJoinedMessage.builder()
+                .players(players)
+                .hostId(room.getHost().getId())
+                .wordBook(wb)
+                .roomCode(room.getRoomCode())
+                .status(room.getStatus().name())
+                .build();
     }
 
     /**

@@ -30,11 +30,14 @@ public class WebSocketSessionManager {
     private final ConcurrentHashMap<Long, Set<WebSocketSession>> roomSessions = new ConcurrentHashMap<>();
     /** userId -> 该用户的 WebSocket 连接（方便一对一推送） */
     private final ConcurrentHashMap<Long, WebSocketSession> userSessions = new ConcurrentHashMap<>();
+    /** 每个 WebSocket 连接的发送锁（避免并发 send 导致 TEXT_PARTIAL_WRITING） */
+    private final ConcurrentHashMap<String, Object> sessionSendLocks = new ConcurrentHashMap<>();
 
     /** 添加新连接 */
     public void addSession(Long roomId, Long userId, WebSocketSession session) {
         roomSessions.computeIfAbsent(roomId, k -> new CopyOnWriteArraySet<>()).add(session);
         userSessions.put(userId, session);
+        sessionSendLocks.putIfAbsent(session.getId(), new Object());
     }
 
     /** 移除连接（断开时清理） */
@@ -47,6 +50,7 @@ public class WebSocketSessionManager {
             }
         }
         userSessions.remove(userId, session);
+        sessionSendLocks.remove(session.getId());
     }
 
     /** 获取某个房间的所有连接 */
@@ -65,24 +69,34 @@ public class WebSocketSessionManager {
         if (sessions == null) return;
 
         for (WebSocketSession session : sessions) {
-            if (session.isOpen()) {
-                try {
-                    session.sendMessage(new org.springframework.web.socket.TextMessage(message));
-                } catch (IOException e) {
-                    log.error("Failed to send message to session {}: {}", session.getId(), e.getMessage());
-                }
-            }
+            sendSafely(session, message);
         }
     }
 
     /** 向指定用户发送消息 */
     public void sendToUser(Long userId, String message) {
         WebSocketSession session = userSessions.get(userId);
-        if (session != null && session.isOpen()) {
+        sendSafely(session, message);
+    }
+
+    /** 向指定 WebSocket 连接发送消息（带发送锁） */
+    public void sendToSession(WebSocketSession session, String message) {
+        sendSafely(session, message);
+    }
+
+    private void sendSafely(WebSocketSession session, String message) {
+        if (session == null || !session.isOpen()) {
+            return;
+        }
+        Object lock = sessionSendLocks.computeIfAbsent(session.getId(), k -> new Object());
+        synchronized (lock) {
+            if (!session.isOpen()) {
+                return;
+            }
             try {
                 session.sendMessage(new org.springframework.web.socket.TextMessage(message));
             } catch (IOException e) {
-                log.error("Failed to send message to user {}: {}", userId, e.getMessage());
+                log.error("Failed to send message to session {}: {}", session.getId(), e.getMessage());
             }
         }
     }
@@ -110,6 +124,7 @@ public class WebSocketSessionManager {
             if (userId != null) {
                 userSessions.remove(userId, session);
             }
+            sessionSendLocks.remove(session.getId());
             if (session.isOpen()) {
                 try {
                     session.close(CloseStatus.NORMAL);
