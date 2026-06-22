@@ -5,6 +5,7 @@ import com.lingoarena.dto.request.CreateRoomRequest;
 import com.lingoarena.dto.response.RoomResponse;
 import com.lingoarena.dto.websocket.RoomClosedMessage;
 import com.lingoarena.dto.websocket.RoomJoinedMessage;
+import com.lingoarena.dto.websocket.PlayerReadyMessage;
 import com.lingoarena.dto.websocket.WebSocketMessage;
 import com.lingoarena.engine.GameManager;
 import com.lingoarena.entity.GameRoom;
@@ -142,6 +143,8 @@ public class RoomService {
             String json = objectMapper.writeValueAsString(
                     new WebSocketMessage<>("room:joined", payload));
             sessionManager.sendToUser(userId, json);
+            // 连接后补发当前房间全量准备状态，避免晚加入玩家错过早先广播
+            sendReadySnapshot(roomId, userId, room);
         } catch (Exception e) {
             log.error("Failed to send room:joined: roomId={}, userId={}", roomId, userId, e);
         }
@@ -176,6 +179,26 @@ public class RoomService {
                 .roomCode(room.getRoomCode())
                 .status(room.getStatus().name())
                 .build();
+    }
+
+    private void sendReadySnapshot(Long roomId, Long receiverUserId, GameRoom room) {
+        try {
+            java.util.Set<Long> readyPlayers = gameManager.getReadyPlayers(roomId);
+            java.util.List<Long> playerIds = new java.util.ArrayList<>();
+            if (room.getHost() != null) playerIds.add(room.getHost().getId());
+            if (room.getGuest() != null) playerIds.add(room.getGuest().getId());
+
+            for (Long playerId : playerIds) {
+                String msg = objectMapper.writeValueAsString(
+                        new WebSocketMessage<>("player:ready_status", PlayerReadyMessage.builder()
+                                .userId(playerId)
+                                .ready(readyPlayers.contains(playerId))
+                                .build()));
+                sessionManager.sendToUser(receiverUserId, msg);
+            }
+        } catch (Exception e) {
+            log.error("Failed to send ready snapshot: roomId={}, receiver={}", roomId, receiverUserId, e);
+        }
     }
 
     /**

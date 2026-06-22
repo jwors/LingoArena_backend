@@ -83,7 +83,11 @@ public class GameService {
             throw new BusinessException(ErrorCode.NOT_ROOM_HOST.getCode(),
                     ErrorCode.NOT_ROOM_HOST.getMessage());
         }
-        if (room.getStatus() != RoomStatus.WAITING) {
+        // 支持 WAITING / FINISHED 直接开局；若 DB 残留 PLAYING 但内存无进行中对局，也允许恢复开局
+        boolean restartable = room.getStatus() == RoomStatus.WAITING
+                || room.getStatus() == RoomStatus.FINISHED
+                || (room.getStatus() == RoomStatus.PLAYING && !gameManager.isGameInProgress(roomId));
+        if (!restartable) {
             throw new BusinessException(ErrorCode.ROOM_ALREADY_STARTED.getCode(),
                     ErrorCode.ROOM_ALREADY_STARTED.getMessage());
         }
@@ -112,7 +116,11 @@ public class GameService {
                 room.getHost().getId(), room.getGuest().getId());
 
         room.setStatus(RoomStatus.PLAYING);
+        room.setWinner(null);
+        room.setHostScore(0);
+        room.setGuestScore(0);
         room.setStartedAt(LocalDateTime.now());
+        room.setFinishedAt(null);
         gameRoomRepository.save(room);
 
         // 广播 game:start（DTO 序列化）

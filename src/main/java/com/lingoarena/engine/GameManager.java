@@ -104,6 +104,12 @@ public class GameManager {
         return ready != null && ready.size() >= 2;
     }
 
+    /** 返回当前房间已准备玩家快照（用于 WS 新连接全量同步） */
+    public Set<Long> getReadyPlayers(Long roomId) {
+        Set<Long> ready = roomReadyPlayers.get(roomId);
+        return ready == null ? Collections.emptySet() : new HashSet<>(ready);
+    }
+
     public Long getOtherPlayerId(Long roomId, Long userId) {
         Long hostId = roomHostId.get(roomId);
         Long guestId = roomGuestId.get(roomId);
