@@ -75,7 +75,7 @@ public class GameService {
      */
     @Transactional
     public void startGame(Long roomId, Long hostId) {
-        GameRoom room = gameRoomRepository.findById(roomId)
+        GameRoom room = gameRoomRepository.findByIdWithDetails(roomId)
                 .orElseThrow(() -> new BusinessException(ErrorCode.ROOM_NOT_FOUND.getCode(),
                         ErrorCode.ROOM_NOT_FOUND.getMessage()));
 
@@ -83,7 +83,11 @@ public class GameService {
             throw new BusinessException(ErrorCode.NOT_ROOM_HOST.getCode(),
                     ErrorCode.NOT_ROOM_HOST.getMessage());
         }
-        if (room.getStatus() != RoomStatus.WAITING) {
+        // 支持 WAITING / FINISHED 直接开局；若 DB 残留 PLAYING 但内存无进行中对局，也允许恢复开局
+        boolean restartable = room.getStatus() == RoomStatus.WAITING
+                || room.getStatus() == RoomStatus.FINISHED
+                || (room.getStatus() == RoomStatus.PLAYING && !gameManager.isGameInProgress(roomId));
+        if (!restartable) {
             throw new BusinessException(ErrorCode.ROOM_ALREADY_STARTED.getCode(),
                     ErrorCode.ROOM_ALREADY_STARTED.getMessage());
         }
@@ -98,12 +102,25 @@ public class GameService {
         }
 
         List<Word> words = wordbookService.getAllWords(room.getWordbook().getId());
+        int requiredQuestions = room.getGameMode() == GameMode.RACE
+                ? room.getTotalRounds()
+                : room.getTotalRounds() * 2;
+        if (words.size() < requiredQuestions) {
+            throw new BusinessException(
+                    ErrorCode.WORDBOOK_INSUFFICIENT_WORDS.getCode(),
+                    ErrorCode.WORDBOOK_INSUFFICIENT_WORDS.getMessage()
+                            + "：需要 " + requiredQuestions + " 个，仅有 " + words.size() + " 个");
+        }
 
         gameManager.startGame(roomId, words, room.getTotalRounds(), room.getGameMode().name(),
                 room.getHost().getId(), room.getGuest().getId());
 
         room.setStatus(RoomStatus.PLAYING);
+        room.setWinner(null);
+        room.setHostScore(0);
+        room.setGuestScore(0);
         room.setStartedAt(LocalDateTime.now());
+        room.setFinishedAt(null);
         gameRoomRepository.save(room);
 
         // 广播 game:start（DTO 序列化）
@@ -144,6 +161,7 @@ public class GameService {
                 .build());
 
         // 启动倒计时（每秒 tick + 超时回调）
+        broadcast(roomId, "timer:tick", new TimerTickMessage(GameManager.DEFAULT_TIME_LIMIT_SECONDS));
         gameManager.startRoundTimer(roomId, userId, GameManager.DEFAULT_TIME_LIMIT_SECONDS,
                 timeLeft -> broadcast(roomId, "timer:tick", new TimerTickMessage(timeLeft)),
                 () -> handleRoundTimeout(roomId, userId));
@@ -160,7 +178,7 @@ public class GameService {
                 .orElseThrow(() -> new BusinessException(ErrorCode.ROOM_NOT_FOUND.getCode(),
                         ErrorCode.ROOM_NOT_FOUND.getMessage()));
 
-        if (room.getStatus() != RoomStatus.PLAYING) {
+        if (room.getStatus() != RoomStatus.PLAYING && !gameManager.isGameInProgress(roomId)) {
             throw new BusinessException(ErrorCode.GAME_NOT_STARTED.getCode(),
                     ErrorCode.GAME_NOT_STARTED.getMessage());
         }
@@ -170,26 +188,23 @@ public class GameService {
 
     /** 处理答题后的 WS 消息推送（answer:result + score:update） */
     public void handleAnswerResult(Long roomId, Long userId, GameManager.AnswerCheckResult result) {
-        // answer:result → 仅答题者
+        // 先取消倒计时，避免与超时回调竞态
+        gameManager.cancelRoundTimer(roomId);
+
         sendToUser(userId, "answer:result", RoundResultMessage.builder()
                 .correct(result.isCorrect())
                 .playerId(userId)
                 .answer(result.getCorrectAnswer())
                 .build());
 
-        // score:update → 全房间
         broadcast(roomId, "score:update", ScoreUpdateMessage.builder()
                 .scores(gameManager.getScores(roomId))
                 .build());
 
-        // 广播 opponent:status {submitted} 通知对手已提交
         broadcast(roomId, "opponent:status", OpponentStatusMessage.builder()
                 .userId(userId)
                 .status("submitted")
                 .build());
-
-        // 取消倒计时
-        gameManager.cancelRoundTimer(roomId);
     }
 
     /**
@@ -197,7 +212,13 @@ public class GameService {
      * 超时玩家视为答错（0 分），直接推进游戏。
      */
     private void handleRoundTimeout(Long roomId, Long userId) {
+        if (!gameManager.consumeTimeout(roomId, userId)) {
+            log.debug("Skip timeout; answer already submitted: roomId={}, userId={}", roomId, userId);
+            return;
+        }
+
         log.info("Round timeout: roomId={}, userId={}", roomId, userId);
+        gameManager.cancelRoundTimer(roomId);
 
         // 通知该用户超时
         sendToUser(userId, "answer:result", RoundResultMessage.builder()
@@ -249,6 +270,11 @@ public class GameService {
     /** 标记玩家已准备 */
     public void setPlayerReady(Long roomId, Long userId) {
         gameManager.setPlayerReady(roomId, userId);
+    }
+
+    /** 取消玩家准备 */
+    public void cancelPlayerReady(Long roomId, Long userId) {
+        gameManager.removePlayerReady(roomId, userId);
     }
 
     /** 获取房主分数 */

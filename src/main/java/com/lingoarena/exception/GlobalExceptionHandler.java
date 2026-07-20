@@ -1,6 +1,7 @@
 package com.lingoarena.exception;
 
 import com.lingoarena.dto.response.ErrorResponse;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -19,6 +20,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
  * 3. Exception（兜底）-> 返回 500 服务器内部错误
  */
 @RestControllerAdvice
+@Slf4j
 public class GlobalExceptionHandler {
 
     @ExceptionHandler(BusinessException.class)
@@ -43,6 +45,7 @@ public class GlobalExceptionHandler {
     /** 兜底：所有未捕获的异常返回 500 */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnknown(Exception e) {
+        log.error("Unhandled exception", e);
         return ResponseEntity
                 .internalServerError()
                 .body(new ErrorResponse("INTERNAL_ERROR", "服务器内部错误"));

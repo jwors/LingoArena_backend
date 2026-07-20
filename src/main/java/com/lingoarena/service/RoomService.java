@@ -5,6 +5,7 @@ import com.lingoarena.dto.request.CreateRoomRequest;
 import com.lingoarena.dto.response.RoomResponse;
 import com.lingoarena.dto.websocket.RoomClosedMessage;
 import com.lingoarena.dto.websocket.RoomJoinedMessage;
+import com.lingoarena.dto.websocket.PlayerReadyMessage;
 import com.lingoarena.dto.websocket.WebSocketMessage;
 import com.lingoarena.engine.GameManager;
 import com.lingoarena.entity.GameRoom;
@@ -120,35 +121,7 @@ public class RoomService {
      */
     private void broadcastRoomJoined(GameRoom room) {
         try {
-            List<RoomJoinedMessage.PlayerInfo> players = new ArrayList<>();
-            players.add(RoomJoinedMessage.PlayerInfo.builder()
-                    .id(room.getHost().getId())
-                    .nickname(room.getHost().getNickname())
-                    .isHost(true)
-                    .build());
-            if (room.getGuest() != null) {
-                players.add(RoomJoinedMessage.PlayerInfo.builder()
-                        .id(room.getGuest().getId())
-                        .nickname(room.getGuest().getNickname())
-                        .isHost(false)
-                        .build());
-            }
-
-            RoomJoinedMessage.WordBookInfo wb = room.getWordbook() != null
-                    ? RoomJoinedMessage.WordBookInfo.builder()
-                        .id(room.getWordbook().getId())
-                        .name(room.getWordbook().getName())
-                        .build()
-                    : null;
-
-            RoomJoinedMessage payload = RoomJoinedMessage.builder()
-                    .players(players)
-                    .hostId(room.getHost().getId())
-                    .wordBook(wb)
-                    .roomCode(room.getRoomCode())
-                    .status(room.getStatus().name())
-                    .build();
-
+            RoomJoinedMessage payload = buildRoomJoinedMessage(room);
             String json = objectMapper.writeValueAsString(
                     new WebSocketMessage<>("room:joined", payload));
             sessionManager.broadcastToRoom(room.getId(), json);
@@ -158,47 +131,73 @@ public class RoomService {
     }
 
     /** 构建 room:joined 消息并发送给指定用户（WS 连接时用） */
+    @Transactional
     public void sendRoomJoined(Long roomId, Long userId) {
-        GameRoom room = gameRoomRepository.findById(roomId).orElse(null);
+        GameRoom room = gameRoomRepository.findByIdWithDetails(roomId).orElse(null);
         if (room == null) {
             log.warn("Room not found for room:joined: roomId={}", roomId);
             return;
         }
         try {
-            List<RoomJoinedMessage.PlayerInfo> players = new ArrayList<>();
-            players.add(RoomJoinedMessage.PlayerInfo.builder()
-                    .id(room.getHost().getId())
-                    .nickname(room.getHost().getNickname())
-                    .isHost(true)
-                    .build());
-            if (room.getGuest() != null) {
-                players.add(RoomJoinedMessage.PlayerInfo.builder()
-                        .id(room.getGuest().getId())
-                        .nickname(room.getGuest().getNickname())
-                        .isHost(false)
-                        .build());
-            }
-
-            RoomJoinedMessage.WordBookInfo wb = room.getWordbook() != null
-                    ? RoomJoinedMessage.WordBookInfo.builder()
-                        .id(room.getWordbook().getId())
-                        .name(room.getWordbook().getName())
-                        .build()
-                    : null;
-
-            RoomJoinedMessage payload = RoomJoinedMessage.builder()
-                    .players(players)
-                    .hostId(room.getHost().getId())
-                    .wordBook(wb)
-                    .roomCode(room.getRoomCode())
-                    .status(room.getStatus().name())
-                    .build();
-
+            RoomJoinedMessage payload = buildRoomJoinedMessage(room);
             String json = objectMapper.writeValueAsString(
                     new WebSocketMessage<>("room:joined", payload));
             sessionManager.sendToUser(userId, json);
+            // 连接后补发当前房间全量准备状态，避免晚加入玩家错过早先广播
+            sendReadySnapshot(roomId, userId, room);
         } catch (Exception e) {
             log.error("Failed to send room:joined: roomId={}, userId={}", roomId, userId, e);
+        }
+    }
+
+    private RoomJoinedMessage buildRoomJoinedMessage(GameRoom room) {
+        List<RoomJoinedMessage.PlayerInfo> players = new ArrayList<>();
+        players.add(RoomJoinedMessage.PlayerInfo.builder()
+                .id(room.getHost().getId())
+                .nickname(room.getHost().getNickname())
+                .isHost(true)
+                .build());
+        if (room.getGuest() != null) {
+            players.add(RoomJoinedMessage.PlayerInfo.builder()
+                    .id(room.getGuest().getId())
+                    .nickname(room.getGuest().getNickname())
+                    .isHost(false)
+                    .build());
+        }
+
+        RoomJoinedMessage.WordBookInfo wb = room.getWordbook() != null
+                ? RoomJoinedMessage.WordBookInfo.builder()
+                    .id(room.getWordbook().getId())
+                    .name(room.getWordbook().getName())
+                    .build()
+                : null;
+
+        return RoomJoinedMessage.builder()
+                .players(players)
+                .hostId(room.getHost().getId())
+                .wordBook(wb)
+                .roomCode(room.getRoomCode())
+                .status(room.getStatus().name())
+                .build();
+    }
+
+    private void sendReadySnapshot(Long roomId, Long receiverUserId, GameRoom room) {
+        try {
+            java.util.Set<Long> readyPlayers = gameManager.getReadyPlayers(roomId);
+            java.util.List<Long> playerIds = new java.util.ArrayList<>();
+            if (room.getHost() != null) playerIds.add(room.getHost().getId());
+            if (room.getGuest() != null) playerIds.add(room.getGuest().getId());
+
+            for (Long playerId : playerIds) {
+                String msg = objectMapper.writeValueAsString(
+                        new WebSocketMessage<>("player:ready_status", PlayerReadyMessage.builder()
+                                .userId(playerId)
+                                .ready(readyPlayers.contains(playerId))
+                                .build()));
+                sessionManager.sendToUser(receiverUserId, msg);
+            }
+        } catch (Exception e) {
+            log.error("Failed to send ready snapshot: roomId={}, receiver={}", roomId, receiverUserId, e);
         }
     }
 

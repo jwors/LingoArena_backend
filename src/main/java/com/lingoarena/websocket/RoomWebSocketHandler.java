@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lingoarena.dto.websocket.*;
 import com.lingoarena.engine.GameManager;
+import com.lingoarena.exception.BusinessException;
 import com.lingoarena.service.GameService;
 import com.lingoarena.service.RoomService;
 import lombok.RequiredArgsConstructor;
@@ -18,7 +19,7 @@ import java.io.IOException;
 
 /**
  * WebSocket 消息处理器。
- *
+ *doc
  * 处理房间阶段的 WebSocket 消息：
  * - 连接时推送 room:joined（房间完整状态）
  * - 连接/断开时广播 opponent:status
@@ -75,8 +76,10 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
     protected void handleTextMessage(WebSocketSession session, TextMessage message) {
         try {
             JsonNode root = objectMapper.readTree(message.getPayload());
-            String type = root.get("type").asText();
-            JsonNode payload = root.get("payload");
+            String type = root.has("type") ? root.get("type").asText() : root.path("event").asText(null);
+            JsonNode payload = root.has("payload") && !root.get("payload").isNull()
+                    ? root.get("payload")
+                    : root.get("data");
 
             Long userId = sessionManager.getUserIdFromSession(session);
             Long roomId = sessionManager.getRoomIdFromSession(session);
@@ -86,15 +89,24 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
                 return;
             }
 
+            if (type == null || type.isBlank()) {
+                sendError(session, "UNKNOWN_TYPE", "缺少消息类型");
+                return;
+            }
+
             switch (type) {
                 case "game:start" -> handleGameStart(roomId, userId);
-                case "player:ready" -> handlePlayerReady(roomId, userId);
+                case "player:ready" -> handlePlayerReadyToggle(roomId, userId, payload);
+                case "player:unready" -> handlePlayerUnready(roomId, userId);
                 case "player:input" -> handlePlayerInput(roomId, userId);
-                case "answer:submit" -> handleSubmitAnswer(roomId, userId, payload);
+                case "answer:submit" -> handleSubmitAnswer(session, roomId, userId, payload);
                 default -> sendError(session, "UNKNOWN_TYPE", "未知消息类型: " + type);
             }
+        } catch (BusinessException e) {
+            log.warn("Business error handling WS message: {}", e.getMessage());
+            sendError(session, e.getCode(), e.getMessage());
         } catch (Exception e) {
-            log.error("Error handling message: {}", e.getMessage());
+            log.error("Error handling WS message", e);
             sendError(session, "MESSAGE_PARSE_ERROR", "消息解析失败");
         }
     }
@@ -137,6 +149,16 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
+    /** 处理玩家准备/取消准备 → 广播 player:ready_status */
+    private void handlePlayerReadyToggle(Long roomId, Long userId, JsonNode payload) {
+        boolean ready = payload == null || !payload.has("ready") || payload.get("ready").asBoolean(true);
+        if (ready) {
+            handlePlayerReady(roomId, userId);
+        } else {
+            handlePlayerUnready(roomId, userId);
+        }
+    }
+
     /** 处理玩家准备 → 广播 player:ready_status */
     private void handlePlayerReady(Long roomId, Long userId) {
         gameService.setPlayerReady(roomId, userId);
@@ -145,6 +167,17 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
                 PlayerReadyMessage.builder()
                         .userId(userId)
                         .ready(true)
+                        .build());
+    }
+
+    /** 处理玩家取消准备 → 广播 player:ready_status */
+    private void handlePlayerUnready(Long roomId, Long userId) {
+        gameService.cancelPlayerReady(roomId, userId);
+
+        broadcastToRoom(roomId, "player:ready_status",
+                PlayerReadyMessage.builder()
+                        .userId(userId)
+                        .ready(false)
                         .build());
     }
 
@@ -158,29 +191,39 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
     }
 
     /** 处理提交答案 */
-    private void handleSubmitAnswer(Long roomId, Long userId, JsonNode payload) {
-        int round = gameService.getCurrentRound(roomId);
-        String answer = payload.get("answer").asText();
-        long timestamp = payload.has("timestamp") ? payload.get("timestamp").asLong() : System.currentTimeMillis();
-
-        // 核验答案
-        GameManager.AnswerCheckResult result = gameService.submitAnswer(roomId, userId, round, answer, timestamp);
-
-        if (result.hasError()) {
-            sendError(sessionManager.getUserSession(userId), "ANSWER_ERROR", result.getError());
+    private void handleSubmitAnswer(WebSocketSession session, Long roomId, Long userId, JsonNode payload) {
+        if (payload == null || payload.isNull()) {
+            sendError(session, "INVALID_PAYLOAD", "缺少 payload");
+            return;
+        }
+        if (!payload.has("answer") || payload.get("answer").isNull()) {
+            sendError(session, "INVALID_PAYLOAD", "缺少 answer 字段");
             return;
         }
 
-        // 推送 answer:result + score:update + opponent:status submitted
+        String answer = payload.get("answer").asText().trim();
+        if (answer.isEmpty()) {
+            sendError(session, "INVALID_PAYLOAD", "答案不能为空");
+            return;
+        }
+
+        int round = gameService.getCurrentRound(roomId);
+        long timestamp = payload.has("timestamp") ? payload.get("timestamp").asLong() : System.currentTimeMillis();
+
+        GameManager.AnswerCheckResult result = gameService.submitAnswer(roomId, userId, round, answer, timestamp);
+
+        if (result.hasError()) {
+            sendError(session, "ANSWER_ERROR", result.getError());
+            return;
+        }
+
         gameService.handleAnswerResult(roomId, userId, result);
 
-        // 检查游戏是否结束
         if (gameService.isGameOver(roomId)) {
             gameService.finishGame(roomId);
             return;
         }
 
-        // 推下一道题给另一位玩家
         Long nextUser = gameService.getOtherPlayerId(roomId, userId);
         if (nextUser != null) {
             gameService.pushNextQuestion(roomId, nextUser);
@@ -208,8 +251,8 @@ public class RoomWebSocketHandler extends TextWebSocketHandler {
                             .code(code)
                             .message(message)
                             .build()));
-            session.sendMessage(new TextMessage(json));
-        } catch (IOException e) {
+            sessionManager.sendToSession(session, json);
+        } catch (Exception e) {
             log.error("Failed to send error message: {}", e.getMessage());
         }
     }
